@@ -1,22 +1,22 @@
 #!/bin/sh
-set -o errexit
+set -xo errexit
 
 source scripts/common.sh
 
-if [ "$(kind get clusters 2>/dev/null)" != "kind" ]; then
-	kind create cluster --config kind/config.yaml
+if [ "$($KIND get clusters 2>/dev/null)" != "kind" ]; then
+	$KIND create cluster --config kind/config.yaml --wait 5m
 fi
 
 reg_name='kind-registry'
 reg_port='5000'
 if [ "$($RUNTIME inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)" != 'true' ]; then
-  $RUNTIME run --replace --network kind \
+  $RUNTIME run --network kind \
     -d --restart=always -p "127.0.0.1:${reg_port}:5000" --name "${reg_name}" \
     registry:2
 fi
 
 REGISTRY_DIR="/etc/containerd/certs.d/localhost:${reg_port}"
-for node in $(kind get nodes); do
+for node in $($KIND get nodes); do
   $RUNTIME exec "${node}" mkdir -p "${REGISTRY_DIR}"
   cat <<EOF | $RUNTIME exec -i "${node}" cp /dev/stdin "${REGISTRY_DIR}/hosts.toml"
 [host."http://${reg_name}:5000"]
@@ -26,6 +26,10 @@ done
 if [ "$($RUNTIME inspect -f='{{json .NetworkSettings.Networks.kind}}' "${reg_name}")" = 'null' ]; then
   $RUNTIME network connect "kind" "${reg_name}"
 fi
+
+rm .kubeconfig
+scripts/kubeconfig.sh
+export KUBECONFIG=$(pwd)/.kubeconfig
 
 cat <<EOF | kubectl apply -f -
 apiVersion: v1

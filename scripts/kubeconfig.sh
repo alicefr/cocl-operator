@@ -3,5 +3,5 @@
 source scripts/common.sh
 
 config=$(pwd)/.kubeconfig
-kind get kubeconfig > $config
+$KIND get kubeconfig > $config
 echo "set export KUBECONFIG=$config"

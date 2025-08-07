@@ -1,5 +1,5 @@
 #!/bin/bash
 
 source scripts/common.sh
-kind delete cluster
-podman rm -f kind-registry
+$KIND delete cluster
+$RUNTIME rm -f kind-registry

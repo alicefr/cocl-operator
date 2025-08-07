@@ -1,7 +1,31 @@
 #!/bin/bash
 
-RUNTIME=${RUNTIME:=podman}
-if [ "$RUNTIME" == "podman" ]; then
+CONT_RUNTIME=${CONT_RUNTIME:=podman}
+ROOT=${ROOT:=false}
+export KIND=kind
+if [ "$CONT_RUNTIME" == "podman" ]; then
 	export KIND_EXPERIMENTAL_PROVIDER=podman
-	export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock
+	if [ ${ROOT} ]; then
+		export DOCKER_HOST=unix://run/podman/podman.sock
+		export RUNTIME="sudo -E podman"
+		export KIND="sudo -E kind"
+	else
+		export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock
+		RUNTIME=podman
+	fi
+else
+	RUNTIME=docker
 fi
+
+BIN_DIR=.out
+CLUSTERCTL=${BIN_DIR}/clusterctl
+
+install_clusterctl() {
+	mkdir -p ${BIN_DIR}
+	curl -L \
+		https://github.com/kubernetes-sigs/cluster-api/releases/download/v${CAPI_VERSION}/clusterctl-linux-amd64 \
+		-o ${CLUSTERCTL}
+
+	chmod +x ${CLUSTERCTL}
+}
+
