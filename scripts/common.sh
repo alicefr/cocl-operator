@@ -22,10 +22,12 @@ CLUSTERCTL=${BIN_DIR}/clusterctl
 
 install_clusterctl() {
 	mkdir -p ${BIN_DIR}
-	curl -L \
-		https://github.com/kubernetes-sigs/cluster-api/releases/download/v${CAPI_VERSION}/clusterctl-linux-amd64 \
-		-o ${CLUSTERCTL}
+	if [ ! -f ${CLUSTERCTL}]; then
+		curl -L \
+			https://github.com/kubernetes-sigs/cluster-api/releases/download/v${CAPI_VERSION}/clusterctl-linux-amd64 \
+			-o ${CLUSTERCTL}
 
-	chmod +x ${CLUSTERCTL}
+		chmod +x ${CLUSTERCTL}
+	fi
 }
 
