@@ -1,5 +1,5 @@
 use anyhow::Context;
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, TimeDelta, Utc};
 use json_patch::{AddOperation, PatchOperation, TestOperation};
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
@@ -512,13 +512,11 @@ mod tests {
         let result = get_image_pcrs(config_map);
         assert!(result.is_err());
         // Check the error message content instead of using unwrap_err()
-        assert!(
-            result
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("but had no data")
-        );
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("but had no data"));
     }
 
     #[test]
@@ -718,43 +716,37 @@ mod tests {
                             "pcrs": [{"id": 0, "value": "pcr0_val", "parts": []}]
                         }
                     }"#;
-                let mut data = BTreeMap::new();
-                data.insert(PCR_CONFIG_FILE.to_string(), pcrs_json.to_string());
-                let cm = ConfigMap {
-                    data: Some(data),
-                    ..Default::default()
+                    let mut data = BTreeMap::new();
+                    data.insert(PCR_CONFIG_FILE.to_string(), pcrs_json.to_string());
+                    let cm = ConfigMap {
+                        data: Some(data),
+                        ..Default::default()
+                    };
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(serde_json::to_string(&cm).unwrap().into_bytes()))
+                        .unwrap()
+                } else if req.method() == Method::GET && req.uri().path().contains("test-rv-map") {
+                    // This is the GET request for the target RV ConfigMap
+                    let cm = ConfigMap::default();
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(serde_json::to_string(&cm).unwrap().into_bytes()))
+                        .unwrap()
+                } else if req.method() == Method::PUT && req.uri().path().contains("test-rv-map") {
+                    // This is the REPLACE (PUT) request for the target RV ConfigMap
+                    let cm = ConfigMap::default(); // Return a success response
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(serde_json::to_string(&cm).unwrap().into_bytes()))
+                        .unwrap()
+                } else {
+                    // For any unexpected request, return 404 Not Found
+                    Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(Body::empty())
+                        .unwrap()
                 };
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .body(Body::from(
-                        serde_json::to_string(&cm).unwrap().into_bytes(),
-                    ))
-                    .unwrap()
-            } else if req.method() == Method::GET && req.uri().path().contains("test-rv-map") {
-                // This is the GET request for the target RV ConfigMap
-                let cm = ConfigMap::default();
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .body(Body::from(
-                        serde_json::to_string(&cm).unwrap().into_bytes(),
-                    ))
-                    .unwrap()
-            } else if req.method() == Method::PUT && req.uri().path().contains("test-rv-map") {
-                // This is the REPLACE (PUT) request for the target RV ConfigMap
-                let cm = ConfigMap::default(); // Return a success response
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .body(Body::from(
-                        serde_json::to_string(&cm).unwrap().into_bytes(),
-                    ))
-                    .unwrap()
-            } else {
-                // For any unexpected request, return 404 Not Found
-                Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body(Body::empty())
-                    .unwrap()
-            };
             Ok::<_, Infallible>(response)
         });
 
