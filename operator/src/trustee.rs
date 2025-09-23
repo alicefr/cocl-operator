@@ -434,10 +434,121 @@ mod tests {
     use crds::{KbsConfig, KbsConfigSpec, Trustee};
     use http::{Method, Request, Response, StatusCode};
     use k8s_openapi::api::core::v1::{ConfigMap, Secret};
+    use kube::api::ApiResource;
     use kube::client::Body;
     use kube::error::ErrorResponse;
     use std::convert::Infallible;
     use tower::service_fn;
+
+    macro_rules! assert_kube_api_error {
+        ($err:expr, $code:expr, $reason:expr, $message:expr, $status:expr) => {{
+            let kube_error = $err
+                .downcast_ref::<kube::Error>()
+                .expect(&format!("Expected kube::Error, got: {:?}", $err));
+
+            if let kube::Error::Api(error_response) = kube_error {
+                assert_eq!(error_response.code, $code);
+                assert_eq!(error_response.reason, $reason);
+                assert_eq!(error_response.message, $message);
+                assert_eq!(error_response.status, $status);
+            } else {
+                assert!(false, "Expected kube::Error::Api, got: {:?}", kube_error);
+            }
+        }};
+    }
+    pub struct MockClient<T>
+    where
+        T: serde::Serialize + for<'de> serde::Deserialize<'de>,
+    {
+        response_data: T,
+        status_code: StatusCode,
+        namespace: String,
+    }
+    impl<T> MockClient<T>
+    where
+        T: serde::Serialize + for<'de> serde::Deserialize<'de> + Clone + Send + 'static,
+    {
+        pub fn new(status_code: StatusCode, response_data: T, namespace: String) -> Self {
+            Self {
+                response_data,
+                status_code,
+                namespace,
+            }
+        }
+        pub fn into_client(self) -> Client {
+            let response_json = serde_json::to_string(&self.response_data).unwrap();
+            let (kind, name) = serde_json::from_str::<serde_json::Value>(&response_json)
+                .map(|json_value| {
+                    let kind = json_value
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown")
+                        .to_string();
+                    let name = json_value
+                        .get("metadata")
+                        .and_then(|m| m.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("Unknown")
+                        .to_string();
+                    (kind, name)
+                })
+                .unwrap_or(("Unknown".to_string(), "Unknown".to_string()));
+            let plural = kind.to_lowercase() + "s";
+            let namespace = self.namespace.clone();
+
+            let mock_svc = service_fn(move |_req: Request<Body>| {
+                let body = if self.status_code == StatusCode::OK {
+                    let response_json = serde_json::to_string(&self.response_data).unwrap();
+                    Body::from(response_json.into_bytes())
+                } else {
+                    let error_response = match self.status_code {
+                        StatusCode::CONFLICT => ErrorResponse {
+                            status: "Failure".to_string(),
+                            message: format!("{plural} \"{name}\" already exists"),
+                            reason: "AlreadyExists".to_string(),
+                            code: 409,
+                        },
+                        StatusCode::INTERNAL_SERVER_ERROR => ErrorResponse {
+                            status: "Failure".to_string(),
+                            message: "internal server error".to_string(),
+                            reason: "ServerTimeout".to_string(),
+                            code: 500,
+                        },
+                        StatusCode::NOT_FOUND => ErrorResponse {
+                            status: "Failure".to_string(),
+                            message: "resource not found".to_string(),
+                            reason: "NotFound".to_string(),
+                            code: 404,
+                        },
+                        StatusCode::BAD_REQUEST => ErrorResponse {
+                            status: "Failure".to_string(),
+                            message: "bad request".to_string(),
+                            reason: "BadRequest".to_string(),
+                            code: 400,
+                        },
+                        _ => ErrorResponse {
+                            status: "Failure".to_string(),
+                            message: format!(
+                                "error with status code {}",
+                                self.status_code.as_u16()
+                            ),
+                            reason: "Unknown".to_string(),
+                            code: self.status_code.as_u16(),
+                        },
+                    };
+                    let error_json = serde_json::to_string(&error_response).unwrap();
+                    Body::from(error_json.into_bytes())
+                };
+
+                let response = Response::builder()
+                    .status(self.status_code)
+                    .body(body)
+                    .unwrap();
+                async move { Ok::<_, Infallible>(response) }
+            });
+            Client::new(mock_svc, namespace)
+        }
+    }
 
     // -----------------------------------------------------------------
     // Core helper functions for mocking the K8s API Server
@@ -549,46 +660,60 @@ mod tests {
     // --- Tests for `create_reference_value_config_map` ---
     #[tokio::test]
     async fn test_create_rv_config_map_success() {
-        // 1. Prepare mock response: K8s API usually returns 200 OK with the created object on success.
-        let created_cm_json = serde_json::to_string(&ConfigMap {
+        let ns = "test".to_string();
+        let config = ConfigMap {
             metadata: ObjectMeta {
                 name: Some("test-rv-map".to_string()),
+                namespace: Some(ns.clone()),
                 ..Default::default()
             },
             ..Default::default()
-        })
-        .unwrap();
-
-        // 2. Create the mock client
-        let client = mock_client(StatusCode::OK, created_cm_json.into_bytes());
-
-        // 3. Call the function under test
+        };
+        let client = MockClient::new(StatusCode::OK, config, ns).into_client();
         let result = create_reference_value_config_map(client, "test-ns", "test-rv-map").await;
-
-        // 4. Assert the result: We expect the function to complete successfully without any errors.
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_create_rv_config_map_already_exists() {
-        // 1. Prepare the JSON body for a K8s API error response
-        let error_response = ErrorResponse {
-            status: "Failure".to_string(),
-            message: "configmaps \"test-rv-map\" already exists".to_string(),
-            reason: "AlreadyExists".to_string(),
-            code: 409,
+        let ns = "test".to_string();
+        let config = ConfigMap {
+            metadata: ObjectMeta {
+                name: Some("test-rv-map".to_string()),
+                namespace: Some(ns.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
         };
-        let error_body = serde_json::to_string(&error_response).unwrap();
-
-        // 2. Create a mock client that returns 409 Conflict
-        let client = mock_client(StatusCode::CONFLICT, error_body.into_bytes());
-
-        // 3. Call the function under test
+        let client = MockClient::new(StatusCode::CONFLICT, config, ns).into_client();
         let result = create_reference_value_config_map(client, "test-ns", "test-rv-map").await;
 
-        // 4. Assert the result: Because the `info_if_exists!` macro catches the 409 error
-        // and treats it as non-fatal, we expect the function to still return Ok(()).
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_create_rv_config_error() {
+        let ns = "test".to_string();
+        let config = ConfigMap {
+            metadata: ObjectMeta {
+                name: Some("test-rv-map".to_string()),
+                namespace: Some(ns.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let client = MockClient::new(StatusCode::INTERNAL_SERVER_ERROR, config, ns).into_client();
+
+        let result = create_reference_value_config_map(client, "test-ns", "test-rv-map").await;
+
+        let err = result.unwrap_err();
+        assert_kube_api_error!(
+            err,
+            500,
+            "ServerTimeout",
+            "internal server error",
+            "Failure"
+        );
     }
 
     #[tokio::test]
