@@ -824,6 +824,7 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< HEAD
 name = "ed25519"
 version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -845,6 +846,8 @@ dependencies = [
 ]
 
 [[package]]
+=======
+>>>>>>> 8ce9fd0 (Install KubeVirt)
 name = "educe"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -987,12 +990,15 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< HEAD
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
+=======
+>>>>>>> 8ce9fd0 (Install KubeVirt)
 name = "find-msvc-tools"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3495,7 +3501,11 @@ version = "0.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b86f5297f0f04d08cabaa0f6bff7cb6aec4d9c3b49d87990d63da9d9156a8c3"
 dependencies = [
+<<<<<<< HEAD
  "ed25519-dalek",
+=======
+ "num-bigint-dig",
+>>>>>>> 8ce9fd0 (Install KubeVirt)
  "p256",
  "p384",
  "p521",
