@@ -165,3 +165,6 @@ define cargo-install-tool
 	mv "$$(dirname $(1))/$(2)" $(1) ;\
 }
 endef
+integration-tests:
+	RUST_LOG=info cargo test --test confidential_cluster --test attestation --features virtualization -- \
+				--no-capture  --test-threads=3
