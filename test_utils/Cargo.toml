@@ -8,6 +8,9 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+virtualization = []
+
 [dependencies]
 anyhow.workspace = true
 cocl-operator-lib = { path = "../lib" }
@@ -16,6 +19,8 @@ env_logger.workspace = true
 k8s-openapi.workspace = true
 kube = { workspace = true }
 log.workspace = true
+rand_core = "0.6"
 serde_json.workspace = true
+ssh-key = { version = "0.6", features = ["rsa", "std"] }
 tokio = { workspace = true, features = ["process"] }
 uuid.workspace = true
