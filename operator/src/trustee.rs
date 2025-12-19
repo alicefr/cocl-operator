@@ -10,24 +10,27 @@ use chrono::{DateTime, TimeDelta, Utc};
 use clevis_pin_trustee_lib::Key as ClevisKey;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EmptyDirVolumeSource, PodSpec,
-    PodTemplateSpec, Secret, SecretVolumeSource, Service, ServicePort, ServiceSpec, Volume,
-    VolumeMount,
+    ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EmptyDirVolumeSource, EnvVar,
+    KeyToPath, PodSpec, PodTemplateSpec, ProjectedVolumeSource, Secret, SecretProjection,
+    SecretVolumeSource, Service, ServicePort, ServiceSpec, Volume, VolumeMount, VolumeProjection,
 };
 use k8s_openapi::apimachinery::pkg::{
     apis::meta::v1::{LabelSelector, OwnerReference},
     util::intstr::IntOrString,
 };
-use kube::{Api, Client, Resource, api::ObjectMeta};
+use kube::{
+    Api, Client, Resource,
+    api::{ObjectMeta, Patch, PatchParams},
+};
 use log::info;
 use operator::{RvContextData, create_or_info_if_exists};
 use serde::{Serialize, Serializer};
-use serde_json::Value::String as JsonString;
+use serde_json::{Value::String as JsonString, json};
 use std::collections::BTreeMap;
 use trusted_cluster_operator_lib::reference_values::*;
 
 const TRUSTEE_DATA_DIR: &str = "/opt/trustee";
-const TRUSTEE_SECRETS_PATH: &str = "/opt/trustee/kbs-repository/default";
+pub const TRUSTEE_SECRETS_PATH: &str = "/opt/trustee/kbs-repository/default";
 const KBS_CONFIG_FILE: &str = "kbs-config.toml";
 pub(crate) const REFERENCE_VALUES_FILE: &str = "reference-values.json";
 
@@ -35,6 +38,8 @@ pub(crate) const TRUSTEE_DATA_MAP: &str = "trustee-data";
 const ATT_POLICY_MAP: &str = "attestation-policy";
 const DEPLOYMENT_NAME: &str = "trustee-deployment";
 const INTERNAL_KBS_PORT: i32 = 8080;
+const TRUSTED_AK_KEYS_VOLUME: &str = "trusted-ak-keys";
+const TRUSTED_AK_KEYS_DIR: &str = "/etc/tpm/trusted_ak_keys";
 
 fn primitive_date_time_to_str<S>(d: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error>
 where
@@ -115,7 +120,23 @@ fn generate_luks_key() -> Result<Vec<u8>> {
     serde_json::to_vec(&jwk).map_err(Into::into)
 }
 
-fn generate_secret_volume(id: &str) -> (Volume, VolumeMount) {
+fn generate_secret_volume(
+    id: &str,
+    directory: &str,
+    subpath: Option<&str>,
+) -> (Volume, VolumeMount) {
+    let mut volume_mount = VolumeMount {
+        name: id.to_string(),
+        mount_path: format!("{directory}/{id}"),
+        ..Default::default()
+    };
+
+    if let Some(sp) = subpath {
+        if !sp.is_empty() {
+            volume_mount.sub_path = Some(sp.to_string());
+        }
+    }
+
     (
         Volume {
             name: id.to_string(),
@@ -125,15 +146,16 @@ fn generate_secret_volume(id: &str) -> (Volume, VolumeMount) {
             }),
             ..Default::default()
         },
-        VolumeMount {
-            name: id.to_string(),
-            mount_path: format!("{TRUSTEE_SECRETS_PATH}/{id}"),
-            ..Default::default()
-        },
+        volume_mount,
     )
 }
 
-pub async fn mount_secret(client: Client, id: &str) -> Result<()> {
+pub async fn mount_secret(
+    client: Client,
+    id: &str,
+    directory: &str,
+    subpath: Option<&str>,
+) -> Result<()> {
     let deployments: Api<Deployment> = Api::default_namespaced(client);
     let mut deployment = deployments.get(DEPLOYMENT_NAME).await?;
     let err = format!("Deployment {DEPLOYMENT_NAME} existed, but had no spec");
@@ -141,17 +163,151 @@ pub async fn mount_secret(client: Client, id: &str) -> Result<()> {
     let err = format!("Deployment {DEPLOYMENT_NAME} existed, but had no pod spec");
     let pod_spec = depl_spec.template.spec.as_mut().context(err)?;
 
-    let (volume, volume_mount) = generate_secret_volume(id);
-    pod_spec.volumes.get_or_insert_default().push(volume);
+    let (volume, volume_mount) = generate_secret_volume(id, directory, subpath);
+
+    let volumes = pod_spec.volumes.get_or_insert_default();
     let err = format!("Deployment {DEPLOYMENT_NAME} existed, but had no containers");
     let container = pod_spec.containers.get_mut(0).context(err)?;
     let vol_mounts = container.volume_mounts.get_or_insert_default();
+
+    let volume_exists = volumes.iter().any(|v| v.name == volume.name);
+    let volume_mount_exists = vol_mounts.iter().any(|vm| vm.name == volume_mount.name);
+
+    if volume_exists || volume_mount_exists {
+        info!("Secret {id} already mounted to {DEPLOYMENT_NAME}");
+        return Ok(());
+    }
+
+    volumes.push(volume);
     vol_mounts.push(volume_mount);
 
     deployments
         .replace(DEPLOYMENT_NAME, &Default::default(), &deployment)
         .await?;
     info!("Mounted secret {id} to {DEPLOYMENT_NAME}");
+    Ok(())
+}
+
+pub async fn mount_attestation_key(client: Client, _secret_name: &str) -> Result<()> {
+    let secrets: Api<Secret> = Api::default_namespaced(client.clone());
+    let secret_list = secrets.list(&Default::default()).await?;
+
+    let ak_secrets: Vec<String> = secret_list
+        .items
+        .iter()
+        .filter(|secret| {
+            secret
+                .metadata
+                .owner_references
+                .as_ref()
+                .map(|owners| owners.iter().any(|owner| owner.kind == "AttestationKey"))
+                .unwrap_or(false)
+        })
+        .filter_map(|secret| secret.metadata.name.clone())
+        .collect();
+
+    let deployments: Api<Deployment> = Api::default_namespaced(client);
+    let deployment = deployments.get(DEPLOYMENT_NAME).await?;
+    let err = format!("Deployment {DEPLOYMENT_NAME} existed, but had no spec");
+    let depl_spec = deployment.spec.as_ref().context(err)?;
+    let err = format!("Deployment {DEPLOYMENT_NAME} existed, but had no pod spec");
+    let pod_spec = depl_spec.template.spec.as_ref().context(err)?;
+
+    // Get existing volumes and volumeMounts, filtering out the attestation key volume
+    let mut volumes: Vec<Volume> = pod_spec
+        .volumes
+        .as_ref()
+        .map(|v| {
+            v.iter()
+                .filter(|vol| vol.name != TRUSTED_AK_KEYS_VOLUME)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let err = format!("Deployment {DEPLOYMENT_NAME} existed, but had no containers");
+    let container = pod_spec.containers.get(0).context(err)?;
+    let mut vol_mounts: Vec<VolumeMount> = container
+        .volume_mounts
+        .as_ref()
+        .map(|vm| {
+            vm.iter()
+                .filter(|mount| mount.name != TRUSTED_AK_KEYS_VOLUME)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if ak_secrets.is_empty() {
+        info!("No AttestationKey secrets found, removing projected volume from {DEPLOYMENT_NAME}");
+    } else {
+        // Build the projected volume with all AttestationKey secrets
+        let projections: Vec<VolumeProjection> = ak_secrets
+            .iter()
+            .map(|secret_name| VolumeProjection {
+                secret: Some(SecretProjection {
+                    name: secret_name.to_string(),
+                    items: Some(vec![KeyToPath {
+                        key: "public_key".to_string(),
+                        path: format!("{}.pub", secret_name),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .collect();
+
+        let projected_volume = Volume {
+            name: TRUSTED_AK_KEYS_VOLUME.to_string(),
+            projected: Some(ProjectedVolumeSource {
+                sources: Some(projections),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        volumes.push(projected_volume);
+
+        vol_mounts.push(VolumeMount {
+            name: TRUSTED_AK_KEYS_VOLUME.to_string(),
+            mount_path: TRUSTED_AK_KEYS_DIR.to_string(),
+            ..Default::default()
+        });
+    }
+
+    // Check if volumes or volumeMounts have changed
+    let volumes_changed = pod_spec.volumes.as_ref() != Some(&volumes);
+    let vol_mounts_changed = container.volume_mounts.as_ref() != Some(&vol_mounts);
+
+    if volumes_changed || vol_mounts_changed {
+        // Patch the deployment with updated volumes and volumeMounts
+        let patch = json!({
+            "spec": {
+                "template": {
+                    "spec": {
+                        "volumes": volumes,
+                        "containers": [{
+                            "name": "kbs",
+                            "volumeMounts": vol_mounts
+                        }]
+                    }
+                }
+            }
+        });
+
+        deployments
+            .patch(
+                DEPLOYMENT_NAME,
+                &PatchParams::default(),
+                &Patch::Strategic(&patch),
+            )
+            .await?;
+        info!("Updated {DEPLOYMENT_NAME} with attestation key volumes");
+    } else {
+        info!("No changes to attestation key volumes, skipping deployment update");
+    }
+
     Ok(())
 }
 
@@ -295,6 +451,11 @@ fn generate_kbs_pod_spec(image: &str) -> PodSpec {
                 "--config-file".to_string(),
                 format!("{TRUSTEE_DATA_DIR}/{KBS_CONFIG_FILE}"),
             ]),
+            env: Some(vec![EnvVar {
+                name: "RUST_LOG".to_string(),
+                value: Some("debug".to_string()),
+                ..Default::default()
+            }]),
             image: Some(image.to_string()),
             name: "kbs".to_string(),
             ports: Some(vec![ContainerPort {
@@ -367,7 +528,41 @@ pub async fn generate_kbs_deployment(
 mod tests {
     use super::*;
     use crate::mock_client::*;
+    use compute_pcrs_lib::Pcr;
     use http::{Method, Request, StatusCode};
+
+    fn dummy_pcrs() -> ImagePcrs {
+        ImagePcrs(BTreeMap::from([(
+            "cos".to_string(),
+            ImagePcr {
+                first_seen: Utc::now(),
+                pcrs: vec![
+                    Pcr {
+                        id: 0,
+                        value: "pcr0_val".to_string(),
+                        parts: vec![],
+                    },
+                    Pcr {
+                        id: 1,
+                        value: "pcr1_val".to_string(),
+                        parts: vec![],
+                    },
+                ],
+                reference: "".to_string(),
+            },
+        )]))
+    }
+
+    fn dummy_pcrs_map() -> ConfigMap {
+        let data = BTreeMap::from([(
+            PCR_CONFIG_FILE.to_string(),
+            serde_json::to_string(&dummy_pcrs()).unwrap(),
+        )]);
+        ConfigMap {
+            data: Some(data),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_get_image_pcrs_success() {
@@ -510,7 +705,11 @@ mod tests {
             _ => panic!("unexpected API interaction: {req:?}, counter {ctr}"),
         };
         count_check!(2, clos, |client| {
-            assert!(mount_secret(client, "id").await.is_ok());
+            assert!(
+                mount_secret(client, "id", TRUSTEE_SECRETS_PATH, None)
+                    .await
+                    .is_ok()
+            );
         });
     }
 
@@ -518,7 +717,11 @@ mod tests {
     async fn test_mount_secret_no_depl() {
         let clos = async |_, _| Err(StatusCode::NOT_FOUND);
         count_check!(1, clos, |client| {
-            assert!(mount_secret(client, "id").await.is_err());
+            assert!(
+                mount_secret(client, "id", TRUSTEE_SECRETS_PATH, None)
+                    .await
+                    .is_err()
+            );
         });
     }
 
@@ -530,7 +733,10 @@ mod tests {
             Ok(serde_json::to_string(&depl).unwrap())
         };
         count_check!(1, clos, |client| {
-            let err = mount_secret(client, "id").await.err().unwrap();
+            let err = mount_secret(client, "id", TRUSTEE_SECRETS_PATH, None)
+                .await
+                .err()
+                .unwrap();
             assert!(err.to_string().contains("but had no spec"));
         });
     }
@@ -544,7 +750,10 @@ mod tests {
             Ok(serde_json::to_string(&depl).unwrap())
         };
         count_check!(1, clos, |client| {
-            let err = mount_secret(client, "id").await.err().unwrap();
+            let err = mount_secret(client, "id", TRUSTEE_SECRETS_PATH, None)
+                .await
+                .err()
+                .unwrap();
             assert!(err.to_string().contains("but had no pod spec"));
         });
     }
@@ -559,7 +768,10 @@ mod tests {
             Ok(serde_json::to_string(&depl).unwrap())
         };
         count_check!(1, clos, |client| {
-            let err = mount_secret(client, "id").await.err().unwrap();
+            let err = mount_secret(client, "id", TRUSTEE_SECRETS_PATH, None)
+                .await
+                .err()
+                .unwrap();
             assert!(err.to_string().contains("but had no containers"));
         });
     }

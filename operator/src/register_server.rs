@@ -128,7 +128,7 @@ async fn keygen_reconcile(
     let client = Arc::unwrap_or_clone(client);
     let id = &machine.spec.id;
     trustee::generate_secret(client.clone(), id).await?;
-    trustee::mount_secret(client.clone(), id).await?;
+    trustee::mount_secret(client.clone(), id, trustee::TRUSTEE_SECRETS_PATH, None).await?;
     Ok(Action::await_change())
 }
 

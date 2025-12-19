@@ -24,12 +24,15 @@ PUSH_FLAGS ?=
 OPERATOR_IMAGE=$(REGISTRY)/trusted-cluster-operator:$(TAG)
 COMPUTE_PCRS_IMAGE=$(REGISTRY)/compute-pcrs:$(TAG)
 REG_SERVER_IMAGE=$(REGISTRY)/registration-server:$(TAG)
+ATTESTATION_KEY_REGISTER_IMAGE=$(REGISTRY)/attestation-key-register:$(TAG)
 # TODO add support for TPM AK verification, then move to a KBS with implemented verifier
-TRUSTEE_IMAGE ?= quay.io/trusted-execution-clusters/key-broker-service:tpm-verifier-built-in-as-20250711
+TRUSTEE_IMAGE ?= quay.io/trusted-execution-clusters/key-broker-service:latest
+# tagged as 42.20250705.3.0
+APPROVED_IMAGE ?= quay.io/fedora/fedora-coreos@sha256:8f11c87187dfe83145001e9571948f9ab466e9f4a8b1e092a4798e5db1030dc3
 
 BUILD_TYPE ?= release
 
-all: build trusted-cluster-gen reg-server
+all: build trusted-cluster-gen reg-server attestation-key-register
 
 build: crds-rs
 	cargo build -p compute-pcrs
@@ -37,6 +40,9 @@ build: crds-rs
 
 reg-server: crds-rs
 	cargo build -p register-server
+
+attestation-key-register: crds-rs
+	cargo build -p attestation-key-register
 
 CRD_YAML_PATH = config/crd
 API_PATH = api/v1alpha1
@@ -62,36 +68,42 @@ trusted-cluster-gen: api/trusted-cluster-gen.go
 	go build -o $@ $<
 
 DEPLOY_PATH = config/deploy
-manifests: trusted-cluster-gen
+manifests: trusted-cluster-gen generate
 	./trusted-cluster-gen -output-dir $(DEPLOY_PATH) \
 		-namespace $(NAMESPACE) \
 		-image $(OPERATOR_IMAGE) \
 		-trustee-image $(TRUSTEE_IMAGE) \
 		-pcrs-compute-image $(COMPUTE_PCRS_IMAGE) \
-		-register-server-image $(REG_SERVER_IMAGE)
+		-register-server-image $(REG_SERVER_IMAGE) \
+		-attestation-key-register-image $(ATTESTATION_KEY_REGISTER_IMAGE) \
+		-approved-image $(APPROVED_IMAGE)
 
 cluster-up:
-	scripts/create-cluster-kind.sh
+	RUNTIME=$(RUNTIME) scripts/create-cluster-kind.sh
 
 cluster-cleanup:
-	$(KUBECTL) delete -f manifests/trusted_execution_cluster_cr.yaml
-	$(KUBECTL) delete -f manifests/trusted_execution_cluster_crd.yaml
-	$(KUBECTL) delete -f manifests/operator.yaml
+	$(KUBECTL) delete -f $(DEPLOY_PATH)/trusted_execution_cluster_cr.yaml
+	$(KUBECTL) delete -f $(CRD_YAML_PATH)/trusted-execution-clusters.io_trustedexecutionclusters.yaml
+	$(KUBECTL) delete -f $(DEPLOY_PATH)/operator.yaml
 
 
 cluster-down:
-	scripts/delete-cluster-kind.sh
+	RUNTIME=$(RUNTIME) scripts/delete-cluster-kind.sh
+
+CONTAINER_CLI ?= podman
+RUNTIME ?= podman
 
 image:
-	podman build --build-arg build_type=$(BUILD_TYPE) -t $(OPERATOR_IMAGE) -f Containerfile .
-	podman build --build-arg build_type=$(BUILD_TYPE) -t $(COMPUTE_PCRS_IMAGE) -f compute-pcrs/Containerfile .
-	podman build --build-arg build_type=$(BUILD_TYPE) -t $(REG_SERVER_IMAGE) -f register-server/Containerfile .
+	$(CONTAINER_CLI) build --build-arg build_type=$(BUILD_TYPE) -t $(OPERATOR_IMAGE) -f Containerfile .
+	$(CONTAINER_CLI) build --build-arg build_type=$(BUILD_TYPE) -t $(COMPUTE_PCRS_IMAGE) -f compute-pcrs/Containerfile .
+	$(CONTAINER_CLI) build --build-arg build_type=$(BUILD_TYPE) -t $(REG_SERVER_IMAGE) -f register-server/Containerfile .
+	$(CONTAINER_CLI) build --build-arg build_type=$(BUILD_TYPE) -t $(ATTESTATION_KEY_REGISTER_IMAGE) -f attestation-key-register/Containerfile .
 
 push: image
-	podman push $(OPERATOR_IMAGE) $(PUSH_FLAGS)
-	podman push $(COMPUTE_PCRS_IMAGE) $(PUSH_FLAGS)
-	podman push $(REG_SERVER_IMAGE) $(PUSH_FLAGS)
-
+	$(CONTAINER_CLI) push $(OPERATOR_IMAGE) $(PUSH_FLAGS)
+	$(CONTAINER_CLI) push $(COMPUTE_PCRS_IMAGE) $(PUSH_FLAGS)
+	$(CONTAINER_CLI) push $(REG_SERVER_IMAGE) $(PUSH_FLAGS)
+	$(CONTAINER_CLI) push $(ATTESTATION_KEY_REGISTER_IMAGE) $(PUSH_FLAGS)
 
 release-tarball: manifests
 	tar -cf trusted-execution-operator-$(TAG).tar config
@@ -100,7 +112,7 @@ install: $(YQ)
 ifndef TRUSTEE_ADDR
 	$(error TRUSTEE_ADDR is undefined)
 endif
-	scripts/clean-cluster-kind.sh $(OPERATOR_IMAGE) $(COMPUTE_PCRS_IMAGE) $(REG_SERVER_IMAGE)
+	scripts/clean-cluster-kind.sh $(OPERATOR_IMAGE) $(COMPUTE_PCRS_IMAGE) $(REG_SERVER_IMAGE) $(ATTESTATION_KEY_REGISTER_IMAGE)
 	$(YQ) '.spec.publicTrusteeAddr = "$(TRUSTEE_ADDR):8080"' \
 		-i $(DEPLOY_PATH)/trusted_execution_cluster_cr.yaml
 	$(YQ) '.namespace = "$(NAMESPACE)"' -i config/rbac/kustomization.yaml
@@ -108,6 +120,7 @@ endif
 	$(KUBECTL) apply -f config/crd
 	$(KUBECTL) apply -k config/rbac
 	$(KUBECTL) apply -f $(DEPLOY_PATH)/trusted_execution_cluster_cr.yaml
+	$(KUBECTL) apply -f $(DEPLOY_PATH)/approved_image_cr.yaml
 	$(KUBECTL) apply -f kind/register-forward.yaml
 	$(KUBECTL) apply -f kind/kbs-forward.yaml
 
@@ -140,7 +153,7 @@ test: crds-rs
 test-release: crds-rs
 	cargo test --workspace --bins --release
 
-integration-tests:
+integration-tests: trusted-cluster-gen
 	RUST_LOG=info cargo test --test trusted_execution_cluster --test attestation \
 		--features virtualization -- --no-capture  --test-threads=1
 

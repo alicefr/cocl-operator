@@ -22,6 +22,7 @@ use log::{error, info, warn};
 use trusted_cluster_operator_lib::{TrustedExecutionCluster, TrustedExecutionClusterStatus};
 use trusted_cluster_operator_lib::{conditions::*, update_status};
 
+mod attestation_key_register;
 mod conditions;
 #[cfg(test)]
 mod mock_client;
@@ -30,9 +31,7 @@ mod register_server;
 mod trustee;
 
 use crate::conditions::*;
-
-// tagged as 42.20250705.3.0
-const BOOT_IMAGE: &str = "quay.io/trusted-execution-clusters/fedora-coreos@sha256:e71dad00aa0e3d70540e726a0c66407e3004d96e045ab6c253186e327a2419e5";
+use operator::*;
 
 fn is_installed(status: Option<TrustedExecutionClusterStatus>) -> bool {
     let chk = |c: &Condition| c.type_ == INSTALLED_CONDITION && c.status == "True";
@@ -45,7 +44,7 @@ fn is_installed(status: Option<TrustedExecutionClusterStatus>) -> bool {
 async fn reconcile(
     cluster: Arc<TrustedExecutionCluster>,
     client: Arc<Client>,
-) -> Result<Action, operator::ControllerError> {
+) -> Result<Action, ControllerError> {
     let generation = cluster.metadata.generation;
     let known_address = cluster.spec.public_trustee_addr.is_some();
     let address_condition = known_trustee_address_condition(known_address, generation);
@@ -60,7 +59,7 @@ async fn reconcile(
         info!("Registered deletion of TrustedExecutionCluster {name}");
         let condition = installed_condition(NOT_INSTALLED_REASON_UNINSTALLING, generation);
         conditions.as_mut().unwrap().push(condition);
-        update_status!(clusters, name, TrustedExecutionClusterStatus { conditions });
+        update_status!(clusters, name, TrustedExecutionClusterStatus { conditions })?;
         return Ok(Action::await_change());
     }
 
@@ -78,7 +77,7 @@ async fn reconcile(
         );
         let condition = installed_condition(NOT_INSTALLED_REASON_NON_UNIQUE, generation);
         conditions.as_mut().unwrap().push(condition);
-        update_status!(clusters, name, TrustedExecutionClusterStatus { conditions });
+        update_status!(clusters, name, TrustedExecutionClusterStatus { conditions })?;
         return Ok(Action::requeue(Duration::from_secs(60)));
     }
 
@@ -89,13 +88,14 @@ async fn reconcile(
     let status = TrustedExecutionClusterStatus {
         conditions: installing,
     };
-    update_status!(clusters, name, status);
+    update_status!(clusters, name, status)?;
 
     install_trustee_configuration(kube_client.clone(), &cluster).await?;
-    install_register_server(kube_client, &cluster).await?;
+    install_register_server(kube_client.clone(), &cluster).await?;
+    install_attestation_key_register(kube_client, &cluster).await?;
     let condition = installed_condition(INSTALLED_REASON, generation);
     conditions.as_mut().unwrap().push(condition);
-    update_status!(clusters, name, TrustedExecutionClusterStatus { conditions });
+    update_status!(clusters, name, TrustedExecutionClusterStatus { conditions })?;
     Ok(Action::await_change())
 }
 
@@ -123,23 +123,16 @@ async fn install_trustee_configuration(
         Err(e) => error!("Failed to create the KBS configuration configmap: {e}"),
     }
 
-    let rv_ctx = operator::RvContextData {
+    let rv_ctx = RvContextData {
         client: client.clone(),
         owner_reference: owner_reference.clone(),
         pcrs_compute_image: cluster.spec.pcrs_compute_image.clone(),
     };
+    reference_values::launch_rv_image_controller(rv_ctx.clone()).await;
     reference_values::launch_rv_job_controller(rv_ctx.clone()).await;
     match reference_values::create_pcrs_config_map(client.clone(), owner_reference.clone()).await {
         Ok(_) => info!("Created bare configmap for PCRs"),
         Err(e) => error!("Failed to create the PCRs configmap: {e}"),
-    }
-
-    // TODO machine config input
-    match reference_values::handle_new_image(rv_ctx, BOOT_IMAGE).await {
-        Ok(_) => info!("Computed or retrieved reference values for image: {BOOT_IMAGE}",),
-        Err(e) => {
-            error!("Failed to compute or retrieve reference values for image {BOOT_IMAGE}: {e}",)
-        }
     }
 
     match trustee::generate_attestation_policy(client.clone(), owner_reference.clone()).await {
@@ -184,7 +177,37 @@ async fn install_register_server(client: Client, cluster: &TrustedExecutionClust
         Err(e) => error!("Failed to create register server service: {e}"),
     }
 
-    register_server::launch_keygen_controller(client).await;
+    Ok(())
+}
+
+async fn install_attestation_key_register(
+    client: Client,
+    cluster: &TrustedExecutionCluster,
+) -> Result<()> {
+    let owner_reference = generate_owner_reference(&cluster.metadata)?;
+
+    match attestation_key_register::create_attestation_key_register_deployment(
+        client.clone(),
+        owner_reference.clone(),
+        &cluster.spec.attestation_key_register_image,
+    )
+    .await
+    {
+        Ok(_) => info!("Attestation key register deployment created/updated successfully"),
+        Err(e) => error!("Failed to create attestation key register deployment: {e}"),
+    }
+
+    let port = cluster.spec.attestation_key_register_port;
+    match attestation_key_register::create_attestation_key_register_service(
+        client.clone(),
+        owner_reference,
+        port,
+    )
+    .await
+    {
+        Ok(_) => info!("Attestation key register service created/updated successfully"),
+        Err(e) => error!("Failed to create attestation key register service: {e}"),
+    }
 
     Ok(())
 }
@@ -197,10 +220,15 @@ async fn main() -> Result<()> {
     info!("trusted execution clusters operator",);
     let cl: Api<TrustedExecutionCluster> = Api::default_namespaced(kube_client.clone());
 
+    // Launch all controllers
+    register_server::launch_keygen_controller(kube_client.clone()).await;
+    attestation_key_register::launch_ak_controller(kube_client.clone()).await;
+    attestation_key_register::launch_machine_ak_controller(kube_client.clone()).await;
+
     let client = Arc::new(kube_client);
     Controller::new(cl, watcher::Config::default())
-        .run(reconcile, operator::controller_error_policy, client)
-        .for_each(operator::controller_info)
+        .run(reconcile, controller_error_policy, client)
+        .for_each(controller_info)
         .await;
 
     Ok(())
@@ -228,8 +256,10 @@ mod tests {
                 trustee_image: "".to_string(),
                 pcrs_compute_image: "".to_string(),
                 register_server_image: "".to_string(),
+                attestation_key_register_image: "".to_string(),
                 public_trustee_addr: None,
                 register_server_port: None,
+                attestation_key_register_port: None,
                 trustee_kbs_port: None,
             },
         }
