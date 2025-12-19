@@ -7,6 +7,7 @@ pub mod reference_values;
 
 mod kopium;
 pub use kopium::approvedimages::*;
+pub use kopium::attestationkeys::*;
 pub use kopium::machines::*;
 pub use kopium::trustedexecutionclusters::*;
 
