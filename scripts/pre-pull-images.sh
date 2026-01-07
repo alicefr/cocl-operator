@@ -8,6 +8,7 @@ IMAGES=(
 	"quay.io/kubevirt/virt-controller:${KV_VERSION}"
 	"quay.io/kubevirt/virt-operator:${KV_VERSION}"
 	"quay.io/trusted-execution-clusters/key-broker-service:latest"
+	"quay.io/trusted-execution-clusters/fedora-coreos-kubevirt:20260106"
 )
 
 for IMAGE in "${IMAGES[@]}"; do
