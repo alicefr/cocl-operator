@@ -188,7 +188,7 @@ pub async fn do_mount_secret(client: Client, id: &str, add: bool) -> Result<()> 
     Ok(())
 }
 
-pub async fn mount_attestation_key(client: Client, _secret_name: &str) -> Result<()> {
+pub async fn mount_attestation_key(client: Client) -> Result<()> {
     let secrets: Api<Secret> = Api::default_namespaced(client.clone());
     let secret_list = secrets.list(&Default::default()).await?;
 

@@ -161,6 +161,24 @@ async fn machine_reconcile(
         machine.metadata.name.clone().unwrap_or_default()
     );
     let client = Arc::unwrap_or_clone(client);
+
+    // Check if the machine is being deleted
+    if machine.metadata.deletion_timestamp.is_some() {
+        info!(
+            "Machine {} is being deleted, updating attestation key volumes",
+            machine.metadata.name.clone().unwrap_or_default()
+        );
+        // Update the projected volumes to remove the attestation key associated with this machine
+        // The mount_attestation_key function will rebuild the volumes based on existing secrets
+        trustee::mount_attestation_key(client.clone())
+            .await
+            .map_err(|e| {
+                eprintln!("Error updating attestation key volumes: {}", e);
+                ControllerError::Anyhow(e)
+            })?;
+        return Ok(Action::await_change());
+    }
+
     let machine_address = machine.spec.registration_address.clone();
 
     if machine_address == "" {
@@ -281,7 +299,7 @@ async fn approve_ak(ak: &AttestationKey, machine: &Machine, client: Client) -> R
         create_or_info_if_exists!(client.clone(), Secret, secret);
         info!("Created secret {secret_name} for attestation key {name}");
 
-        trustee::mount_attestation_key(client.clone(), &secret_name).await?;
+        trustee::mount_attestation_key(client.clone()).await?;
     }
 
     Ok(())
