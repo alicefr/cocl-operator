@@ -14,6 +14,7 @@ tpm_pcrs_valid if {
 executables := 3 if {
 	lower(input.azsnpvtpm.tpm.pcr04) in query_reference_value("tpm_pcr4")
 	lower(input.azsnpvtpm.tpm.pcr14) in query_reference_value("tpm_pcr14")
+}
 
 executables := 3 if tpm_pcrs_valid
 

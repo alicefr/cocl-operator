@@ -188,7 +188,7 @@ pub async fn do_mount_secret(client: Client, id: &str, add: bool) -> Result<()> 
     Ok(())
 }
 
-pub async fn mount_attestation_key(client: Client) -> Result<()> {
+pub async fn update_attestation_keys(client: Client) -> Result<()> {
     let secrets: Api<Secret> = Api::default_namespaced(client.clone());
     let secret_list = secrets.list(&Default::default()).await?;
 
@@ -196,6 +196,11 @@ pub async fn mount_attestation_key(client: Client) -> Result<()> {
         .items
         .iter()
         .filter(|secret| {
+            // Filter out secrets that are being deleted
+            if secret.metadata.deletion_timestamp.is_some() {
+                return false;
+            }
+
             secret
                 .metadata
                 .owner_references
@@ -281,8 +286,19 @@ pub async fn mount_attestation_key(client: Client) -> Result<()> {
     let vol_mounts_changed = container.volume_mounts.as_ref() != Some(&vol_mounts);
 
     if volumes_changed || vol_mounts_changed {
+        info!(
+            "Updating {DEPLOYMENT_NAME} - volumes changed: {}, volumeMounts changed: {}",
+            volumes_changed, vol_mounts_changed
+        );
+        info!("New volumes count: {}, new volumeMounts count: {}", volumes.len(), vol_mounts.len());
+
         // Patch the deployment with updated volumes and volumeMounts
         let patch = json!({
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "name": DEPLOYMENT_NAME
+            },
             "spec": {
                 "template": {
                     "spec": {
@@ -299,11 +315,11 @@ pub async fn mount_attestation_key(client: Client) -> Result<()> {
         deployments
             .patch(
                 DEPLOYMENT_NAME,
-                &PatchParams::default(),
-                &Patch::Strategic(&patch),
+                &PatchParams::apply("trusted-cluster-operator").force(),
+                &Patch::Apply(&patch),
             )
             .await?;
-        info!("Updated {DEPLOYMENT_NAME} with attestation key volumes");
+        info!("Successfully patched {DEPLOYMENT_NAME} with attestation key volumes");
     } else {
         info!("No changes to attestation key volumes, skipping deployment update");
     }

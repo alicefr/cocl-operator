@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use futures_util::StreamExt;
 use k8s_openapi::{
     ByteString,
@@ -21,7 +21,7 @@ use k8s_openapi::{
 use kube::{
     Api, Client, Resource,
     api::{ListParams, ObjectList, Patch, PatchParams},
-    runtime::{Controller, controller::Action, watcher},
+    runtime::{Controller, controller::Action, finalizer, finalizer::Event, watcher},
 };
 use log::info;
 use serde_json::json;
@@ -36,6 +36,7 @@ use crate::trustee;
 use operator::{ControllerError, controller_error_policy, create_or_info_if_exists};
 
 const INTERNAL_ATTESTATION_KEY_REGISTER_PORT: i32 = 8001;
+const ATTESTATION_KEY_SECRET_FINALIZER: &str = "trusted-execution-clusters.io/attestationkey-secret-finalizer";
 
 pub async fn create_attestation_key_register_deployment(
     client: Client,
@@ -132,10 +133,9 @@ async fn ak_reconcile(
     ak: Arc<AttestationKey>,
     client: Arc<Client>,
 ) -> Result<Action, ControllerError> {
-    info!(
-        "Attestation Key reconciliation for: {}",
-        ak.metadata.name.clone().unwrap_or_default()
-    );
+    let ak_name = ak.metadata.name.clone().unwrap_or_default();
+    info!("Attestation Key reconciliation for: {}", ak_name);
+
     let client = Arc::unwrap_or_clone(client);
     let machines: Api<Machine> = Api::default_namespaced(client.clone());
     let lp = ListParams::default();
@@ -168,14 +168,6 @@ async fn machine_reconcile(
             "Machine {} is being deleted, updating attestation key volumes",
             machine.metadata.name.clone().unwrap_or_default()
         );
-        // Update the projected volumes to remove the attestation key associated with this machine
-        // The mount_attestation_key function will rebuild the volumes based on existing secrets
-        trustee::mount_attestation_key(client.clone())
-            .await
-            .map_err(|e| {
-                eprintln!("Error updating attestation key volumes: {}", e);
-                ControllerError::Anyhow(e)
-            })?;
         return Ok(Action::await_change());
     }
 
@@ -269,7 +261,7 @@ async fn approve_ak(ak: &AttestationKey, machine: &Machine, client: Client) -> R
         info!("Set Machine as owner of AttestationKey {name}");
     }
 
-    let secret_name = format!("ak-{}", name);
+    let secret_name = name.clone();
     let secrets: Api<Secret> = Api::default_namespaced(client.clone());
     let secret_exists = secrets.get(&secret_name).await.is_ok();
 
@@ -290,6 +282,7 @@ async fn approve_ak(ak: &AttestationKey, machine: &Machine, client: Client) -> R
             metadata: ObjectMeta {
                 name: Some(secret_name.clone()),
                 owner_references: Some(vec![owner_reference]),
+                finalizers: Some(vec![ATTESTATION_KEY_SECRET_FINALIZER.to_string()]),
                 ..Default::default()
             },
             data: Some(data),
@@ -297,12 +290,69 @@ async fn approve_ak(ak: &AttestationKey, machine: &Machine, client: Client) -> R
         };
 
         create_or_info_if_exists!(client.clone(), Secret, secret);
-        info!("Created secret {secret_name} for attestation key {name}");
-
-        trustee::mount_attestation_key(client.clone()).await?;
+        info!("Created secret {secret_name} for attestation key {name} with finalizer");
     }
 
     Ok(())
+}
+
+async fn secret_reconcile(
+    secret: Arc<Secret>,
+    client: Arc<Client>,
+) -> Result<Action, ControllerError> {
+    let secret_name = secret.metadata.name.clone().unwrap_or_default();
+
+    // Only handle secrets owned by AttestationKey
+    let is_ak_secret = secret
+        .metadata
+        .owner_references
+        .as_ref()
+        .map(|owners| owners.iter().any(|owner| owner.kind == "AttestationKey"))
+        .unwrap_or(false);
+
+    if !is_ak_secret {
+        return Ok(Action::await_change());
+    }
+
+    info!("Secret reconciliation for AttestationKey secret: {}", secret_name);
+
+    let secrets: Api<Secret> = Api::default_namespaced(Arc::unwrap_or_clone(client.clone()));
+    finalizer(&secrets, ATTESTATION_KEY_SECRET_FINALIZER, secret, |ev| async move {
+        match ev {
+            Event::Apply(_secret) => {
+                // On creation/update, just update the trustee deployment volumes
+                let client = Arc::unwrap_or_clone(client);
+                trustee::update_attestation_keys(client)
+                    .await
+                    .map(|_| Action::await_change())
+                    .map_err(|e| {
+                        eprintln!("Error updating attestation key volumes on secret apply: {}", e);
+                        finalizer::Error::<ControllerError>::ApplyFailed(e.into())
+                    })
+            }
+            Event::Cleanup(secret) => {
+                let secret_name = secret.metadata.name.clone().unwrap_or_default();
+                info!(
+                    "AttestationKey secret {} is being deleted, updating trustee deployment volumes",
+                    secret_name
+                );
+                let client = Arc::unwrap_or_clone(client);
+                // Update trustee deployment - secrets with deletion_timestamp will be filtered out
+                trustee::update_attestation_keys(client)
+                    .await
+                    .map(|_| Action::await_change())
+                    .map_err(|e| {
+                        eprintln!(
+                            "Error updating attestation key volumes during secret deletion: {}",
+                            e
+                        );
+                        finalizer::Error::<ControllerError>::CleanupFailed(e.into())
+                    })
+            }
+        }
+    })
+    .await
+    .map_err(|e| anyhow!("failed to reconcile attestation key secret: {e}").into())
 }
 
 pub async fn launch_ak_controller(client: Client) {
@@ -328,6 +378,20 @@ pub async fn launch_machine_ak_controller(client: Client) {
                 match res {
                     Ok(o) => info!("machine reconciled for ak approval {o:?}"),
                     Err(e) => info!("machine reconcile failed: {e:?}"),
+                }
+            }),
+    );
+}
+
+pub async fn launch_secret_ak_controller(client: Client) {
+    let secrets: Api<Secret> = Api::default_namespaced(client.clone());
+    tokio::spawn(
+        Controller::new(secrets, watcher::Config::default())
+            .run(secret_reconcile, controller_error_policy, Arc::new(client))
+            .for_each(|res| async move {
+                match res {
+                    Ok(o) => info!("secret reconciled for ak volumes {o:?}"),
+                    Err(e) => info!("secret reconcile failed: {e:?}"),
                 }
             }),
     );

@@ -208,6 +208,7 @@ async fn main() -> Result<()> {
     register_server::launch_keygen_controller(kube_client.clone()).await;
     attestation_key_register::launch_ak_controller(kube_client.clone()).await;
     attestation_key_register::launch_machine_ak_controller(kube_client.clone()).await;
+    attestation_key_register::launch_secret_ak_controller(kube_client.clone()).await;
 
     let client = Arc::new(kube_client);
     Controller::new(cl, watcher::Config::default())
