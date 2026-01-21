@@ -29,7 +29,7 @@ REG_SERVER_IMAGE=$(REGISTRY)/registration-server:$(TAG)
 ATTESTATION_KEY_REGISTER_IMAGE=$(REGISTRY)/attestation-key-register:$(TAG)
 TRUSTEE_IMAGE ?= quay.io/trusted-execution-clusters/key-broker-service:20260106
 # tagged as 42.20250705.3.0
-APPROVED_IMAGE ?= quay.io/fedora/fedora-coreos@sha256:8f11c87187dfe83145001e9571948f9ab466e9f4a8b1e092a4798e5db1030dc3
+APPROVED_IMAGE ?= quay.io/trusted-execution-clusters/fedora-coreos@sha256:6997f51fd27d1be1b5fc2e6cc3ebf16c17eb94d819b5d44ea8d6cf5f826ee773
 
 BUILD_TYPE ?= release
 
