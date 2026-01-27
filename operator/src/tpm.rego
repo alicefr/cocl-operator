@@ -2,27 +2,32 @@ package policy
 
 import rego.v1
 
-default executables := 33
+default hardware := 97
 
 ## TPM validation
-executables := 3 if {
+hardware := 3 if {
   input.tpm.pcr04 in query_reference_value("tpm_pcr4")
-  input.tpm.pcr14 in query_reference_value("tpm_pcr14")
 
 }
+
 # Azure SNP vTPM validation
-executables := 3 if {
+hardware := 3 if {
   lower(input.azsnpvtpm.tpm.pcr04) in query_reference_value("tpm_pcr4")
-  lower(input.azsnpvtpm.tpm.pcr14) in query_reference_value("tpm_pcr14")
 }
 
+## AMD SNP
+hardware := 3 if {
+  input.snp.reported_tcb_snp == 28
+}
+
+default executables := 0
 default configuration := 0
-default hardware := 0
 default file_system := 0
 default instance_identity := 0
 default runtime_opaque := 0
 default storage_opaque := 0
 default sourced_data := 0
+
 trust_claims := {
   "executables": executables,
   "hardware": hardware,
