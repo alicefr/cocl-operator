@@ -74,6 +74,12 @@ yq -i "(.spec.relatedImages[] | select(.name == \"registration-server\")).image 
 yq -i "(.spec.relatedImages[] | select(.name == \"attestation-key-register\")).image = \"${ATTESTATION_KEY_REGISTER_IMAGE}\"" "$CSV_FILE"
 yq -i "(.spec.relatedImages[] | select(.name == \"trustee\")).image = \"${TRUSTEE_IMAGE}\"" "$CSV_FILE"
 
+# Patch RELATED_IMAGE_* environment variables for OLM
+yq -i "(.spec.install.spec.deployments[0].spec.template.spec.containers[0].env[] | select(.name == \"RELATED_IMAGE_TRUSTEE\")).value = \"${TRUSTEE_IMAGE}\"" "$CSV_FILE"
+yq -i "(.spec.install.spec.deployments[0].spec.template.spec.containers[0].env[] | select(.name == \"RELATED_IMAGE_COMPUTE_PCRS\")).value = \"${COMPUTE_PCRS_IMAGE}\"" "$CSV_FILE"
+yq -i "(.spec.install.spec.deployments[0].spec.template.spec.containers[0].env[] | select(.name == \"RELATED_IMAGE_REGISTRATION_SERVER\")).value = \"${REG_SERVER_IMAGE}\"" "$CSV_FILE"
+yq -i "(.spec.install.spec.deployments[0].spec.template.spec.containers[0].env[] | select(.name == \"RELATED_IMAGE_ATTESTATION_KEY_REGISTER\")).value = \"${ATTESTATION_KEY_REGISTER_IMAGE}\"" "$CSV_FILE"
+
 # Patch RBAC rules
 yq -i ".spec.install.spec.clusterPermissions[0].rules = load(\"${RBAC_ROLE_FILE}\").rules" "$CSV_FILE"
 yq -i ".spec.install.spec.clusterPermissions[1].rules = load(\"${METRICS_AUTH_ROLE_FILE}\").rules" "$CSV_FILE"

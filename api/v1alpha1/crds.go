@@ -37,21 +37,29 @@ var (
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.publicAttestationKeyRegisterAddr) || has(self.publicAttestationKeyRegisterAddr)", message="Value is required once set"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.publicTrusteeAddr) || has(self.publicTrusteeAddr)", message="Value is required once set"
 type TrustedExecutionClusterSpec struct {
-	// Image reference to Trustee all-in-one image
+	// Image reference to Trustee all-in-one image.
+	// If not specified, uses RELATED_IMAGE_TRUSTEE environment variable from operator deployment.
+	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Value is immutable"
-	TrusteeImage string `json:"trusteeImage"`
+	TrusteeImage *string `json:"trusteeImage,omitempty"`
 
-	// Image reference to trusted-cluster-operator's compute-pcrs image
+	// Image reference to trusted-cluster-operator's compute-pcrs image.
+	// If not specified, uses RELATED_IMAGE_COMPUTE_PCRS environment variable from operator deployment.
+	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Value is immutable"
-	PcrsComputeImage string `json:"pcrsComputeImage"`
+	PcrsComputeImage *string `json:"pcrsComputeImage,omitempty"`
 
-	// Image reference to trusted-cluster-operator's register-server image
+	// Image reference to trusted-cluster-operator's register-server image.
+	// If not specified, uses RELATED_IMAGE_REGISTRATION_SERVER environment variable from operator deployment.
+	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Value is immutable"
-	RegisterServerImage string `json:"registerServerImage"`
+	RegisterServerImage *string `json:"registerServerImage,omitempty"`
 
-	// Image reference to trusted-cluster-operator's attestation-key-register image
+	// Image reference to trusted-cluster-operator's attestation-key-register image.
+	// If not specified, uses RELATED_IMAGE_ATTESTATION_KEY_REGISTER environment variable from operator deployment.
+	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Value is immutable"
-	AttestationKeyRegisterImage *string `json:"attestationKeyRegisterImage"`
+	AttestationKeyRegisterImage *string `json:"attestationKeyRegisterImage,omitempty"`
 
 	// Address where attester can connect to Attestation Key Register
 	// +optional

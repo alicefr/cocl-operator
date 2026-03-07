@@ -140,9 +140,9 @@ func generateTrustedExecutionClusterCR(args *Args) error {
 			Namespace: args.namespace,
 		},
 		Spec: v1alpha1.TrustedExecutionClusterSpec{
-			TrusteeImage:                     args.trusteeImage,
-			PcrsComputeImage:                 args.pcrsComputeImage,
-			RegisterServerImage:              args.registerServerImage,
+			TrusteeImage:                     &args.trusteeImage,
+			PcrsComputeImage:                 &args.pcrsComputeImage,
+			RegisterServerImage:              &args.registerServerImage,
 			AttestationKeyRegisterImage:      &args.attestationKeyRegisterImage,
 			PublicAttestationKeyRegisterAddr: nil,
 			PublicTrusteeAddr:                nil,

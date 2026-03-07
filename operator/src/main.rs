@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: MIT
 
+use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,6 +30,18 @@ mod trustee;
 
 use crate::conditions::*;
 use operator::*;
+
+/// Default version tag for operator-managed component images
+const COMPONENT_VERSION: &str = "0.2.0";
+
+/// Get image from CR spec, falling back to environment variable (set by OLM), then default.
+/// This enables disconnected/airgap installations where OLM rewrites RELATED_IMAGE_* env vars.
+fn get_image_or_env(cr_image: &Option<String>, env_var: &str, default: &str) -> String {
+    cr_image
+        .clone()
+        .or_else(|| env::var(env_var).ok())
+        .unwrap_or_else(|| default.to_string())
+}
 
 struct ClusterContext {
     client: Client,
@@ -69,10 +82,15 @@ async fn launch_rv_watchers(
              Launching reference value watchers."
         );
         let owner_reference = generate_owner_reference(&*cluster)?;
+        let pcrs_compute_image = get_image_or_env(
+            &cluster.spec.pcrs_compute_image,
+            "RELATED_IMAGE_COMPUTE_PCRS",
+            &format!("quay.io/trusted-execution-clusters/compute-pcrs:{COMPONENT_VERSION}"),
+        );
         let rv_ctx = RvContextData {
             client,
             owner_reference: owner_reference.clone(),
-            pcrs_compute_image: cluster.spec.pcrs_compute_image.clone(),
+            pcrs_compute_image,
         };
         reference_values::launch_rv_image_controller(rv_ctx.clone()).await;
         reference_values::launch_rv_job_controller(rv_ctx.clone()).await;
@@ -167,8 +185,12 @@ async fn install_trustee_configuration(
         Err(e) => error!("Failed to create the KBS service: {e}"),
     }
 
-    let trustee_image = &cluster.spec.trustee_image;
-    match trustee::generate_kbs_deployment(client, owner_reference, trustee_image).await {
+    let trustee_image = get_image_or_env(
+        &cluster.spec.trustee_image,
+        "RELATED_IMAGE_TRUSTEE",
+        "quay.io/trusted-execution-clusters/key-broker-service:20260106",
+    );
+    match trustee::generate_kbs_deployment(client, owner_reference, &trustee_image).await {
         Ok(_) => info!("Generate the KBS deployment"),
         Err(e) => error!("Failed to create the KBS deployment: {e}"),
     }
@@ -179,10 +201,15 @@ async fn install_trustee_configuration(
 async fn install_register_server(client: Client, cluster: &TrustedExecutionCluster) -> Result<()> {
     let owner_reference = generate_owner_reference(cluster)?;
 
+    let register_server_image = get_image_or_env(
+        &cluster.spec.register_server_image,
+        "RELATED_IMAGE_REGISTRATION_SERVER",
+        &format!("quay.io/trusted-execution-clusters/registration-server:{COMPONENT_VERSION}"),
+    );
     match register_server::create_register_server_deployment(
         client.clone(),
         owner_reference.clone(),
-        &cluster.spec.register_server_image,
+        &register_server_image,
     )
     .await
     {
@@ -207,10 +234,15 @@ async fn install_attestation_key_register(
 ) -> Result<()> {
     let owner_reference = generate_owner_reference(cluster)?;
 
+    let attestation_key_register_image = get_image_or_env(
+        &cluster.spec.attestation_key_register_image,
+        "RELATED_IMAGE_ATTESTATION_KEY_REGISTER",
+        &format!("quay.io/trusted-execution-clusters/attestation-key-register:{COMPONENT_VERSION}"),
+    );
     match attestation_key_register::create_attestation_key_register_deployment(
         client.clone(),
         owner_reference.clone(),
-        &cluster.spec.attestation_key_register_image,
+        &attestation_key_register_image,
     )
     .await
     {
